@@ -1,7 +1,7 @@
 locals {
   name_prefix = var.project_name
   # naive arch inference from instance type name
-  instance_arch = contains(var.instance_type, "g.") || contains(var.instance_type, "t4g") ? "arm64" : "x86_64"
+  instance_arch = strcontains(var.instance_type, "g.") || strcontains(var.instance_type, "t4g") ? "arm64" : "x86_64"
 }
 
 resource "random_password" "api_key" {
@@ -57,7 +57,7 @@ resource "aws_internet_gateway" "this" {
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.this.id
   cidr_block              = "10.99.1.0/24"
-  availability_zone       = data.aws_region.current.name ~ "a"
+  availability_zone       = "us-east-1a"
   map_public_ip_on_launch = true
   tags = {
     Name = "${local.name_prefix}-public-a"
@@ -145,22 +145,17 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   role = aws_iam_role.ec2_role.name
 }
 
-data "template_file" "cloud_init" {
-  template = file("${path.module}/../scripts/cloud-init.yaml")
-  vars = {
-    project_name               = var.project_name
-    wg_network_cidr            = var.wg_network_cidr
-    idle_minutes_before_shutdown = var.idle_minutes_before_shutdown
-  }
-}
-
 resource "aws_instance" "vpn" {
   ami           = local.instance_arch == "arm64" ? data.aws_ami.al2023_arm.id : data.aws_ami.al2023_x86.id
   instance_type = var.instance_type
   subnet_id     = aws_subnet.public_a.id
   vpc_security_group_ids = [aws_security_group.vpn.id]
   iam_instance_profile    = aws_iam_instance_profile.ec2_profile.name
-  user_data                = data.template_file.cloud_init.rendered
+  user_data                = templatefile("${path.module}/../scripts/cloud-init.yaml", {
+    project_name                 = var.project_name
+    wg_network_cidr              = var.wg_network_cidr
+    idle_minutes_before_shutdown = var.idle_minutes_before_shutdown
+  })
   metadata_options {
     http_tokens = "required"
   }
