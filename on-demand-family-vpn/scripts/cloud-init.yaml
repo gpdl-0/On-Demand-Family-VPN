@@ -1,0 +1,92 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - wireguard-tools
+  - iptables
+  - docker
+  - docker-compose
+  - python3-pip
+  - jq
+
+write_files:
+  - path: /usr/local/bin/wg-idle-shutdown.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      IDLE_MINUTES=${IDLE_MINUTES:-${idle_minutes_before_shutdown}}
+      WG_IFACE=wg0
+      last=$(wg show $WG_IFACE latest-handshakes | awk '{print $2}' | sort -n | tail -1)
+      now=$(date +%s)
+      if [[ -z "$last" || "$last" -eq 0 ]]; then
+        echo "No handshakes yet; skipping shutdown"
+        exit 0
+      fi
+      idle_sec=$(( now - last ))
+      if (( idle_sec > IDLE_MINUTES*60 )); then
+        echo "Idle for $idle_sec sec; shutting down"
+        /sbin/shutdown -h now
+      else
+        echo "Active within threshold; no action"
+      fi
+
+  - path: /etc/systemd/system/wg-idle-shutdown.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=WireGuard idle shutdown
+
+      [Service]
+      Type=oneshot
+      Environment=IDLE_MINUTES=${idle_minutes_before_shutdown}
+      ExecStart=/usr/local/bin/wg-idle-shutdown.sh
+
+  - path: /etc/systemd/system/wg-idle-shutdown.timer
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Run idle shutdown check every 5 minutes
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /opt/adguard/docker-compose.yaml
+    permissions: '0644'
+    owner: root:root
+    content: |
+      version: '3'
+      services:
+        adguardhome:
+          image: adguard/adguardhome:latest
+          container_name: adguardhome
+          restart: unless-stopped
+          network_mode: host
+          volumes:
+            - /opt/adguard/work:/opt/adguardhome/work
+            - /opt/adguard/conf:/opt/adguardhome/conf
+          # AdGuard will bind to host; we will firewall to wg interface
+
+runcmd:
+  - [ sh, -c, 'systemctl enable --now docker' ]
+  - [ sh, -c, 'sysctl -w net.ipv4.ip_forward=1' ]
+  - [ sh, -c, 'mkdir -p /etc/wireguard /opt/adguard/work /opt/adguard/conf' ]
+  - [ sh, -c, 'PRIVATE_KEY=$(wg genkey); PUBLIC_KEY=$(echo $PRIVATE_KEY | wg pubkey); echo $PRIVATE_KEY > /etc/wireguard/server_private; echo $PUBLIC_KEY > /etc/wireguard/server_public; chmod 600 /etc/wireguard/server_private' ]
+  - [ sh, -c, 'SERVER_PRIV=$(cat /etc/wireguard/server_private); SERVER_PUB=$(cat /etc/wireguard/server_public)' ]
+  - [ sh, -c, 'SERVER_IP=10.44.0.1/24; WG_PORT=51820' ]
+  - [ sh, -c, 'cat >/etc/wireguard/wg0.conf <<EOF\n[Interface]\nAddress = ${wg_network_cidr%/*}.1/24\nListenPort = 51820\nPrivateKey = $(cat /etc/wireguard/server_private)\nPostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\nPostUp = iptables -A INPUT -i wg0 -j ACCEPT\nPostUp = iptables -A FORWARD -i wg0 -j ACCEPT\nPostUp = iptables -A FORWARD -o wg0 -j ACCEPT\nPostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE\nPostDown = iptables -D INPUT -i wg0 -j ACCEPT\nPostDown = iptables -D FORWARD -i wg0 -j ACCEPT\nPostDown = iptables -D FORWARD -o wg0 -j ACCEPT\n\n[Peer]\n# default family device\nPublicKey = $(wg genkey | tee /etc/wireguard/client_private | wg pubkey > /etc/wireguard/client_public; cat /etc/wireguard/client_public)\nAllowedIPs = ${wg_network_cidr%/*}.2/32\nEOF' ]
+  - [ sh, -c, 'systemctl enable --now wg-quick@wg0' ]
+  - [ sh, -c, 'docker compose -f /opt/adguard/docker-compose.yaml up -d' ]
+  - [ sh, -c, 'systemctl enable --now wg-idle-shutdown.timer' ]
+  - [ sh, -c, 'yum install -y amazon-ssm-agent || true; systemctl enable --now amazon-ssm-agent || true' ]
+
+final_message: "On-demand VPN initialization complete"
+
+

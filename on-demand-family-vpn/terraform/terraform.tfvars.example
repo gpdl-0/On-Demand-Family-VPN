@@ -1,0 +1,17 @@
+project_name = "family-vpn"
+region       = "us-east-1"
+aws_profile  = null
+
+# Route53 zone hosting your domain
+hosted_zone_id = "Z123EXAMPLE456"
+record_name    = "vpn.example.com"
+
+# Compute sizing
+instance_type = "t3a.nano" # or t4g.nano on Graviton
+
+# Network
+allow_cidrs_wireguard = ["0.0.0.0/0"]
+idle_minutes_before_shutdown = 30
+wg_network_cidr = "10.44.0.0/24"
+
+
